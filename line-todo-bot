@@ -1,0 +1,306 @@
+const express = require('express');
+const crypto = require('crypto');
+const axios = require('axios');
+
+const app = express();
+
+// ===== 設定區 =====
+const CHANNEL_SECRET = process.env.CHANNEL_SECRET || 'your_channel_secret';
+const CHANNEL_ACCESS_TOKEN = process.env.CHANNEL_ACCESS_TOKEN || 'your_channel_access_token';
+const PORT = process.env.PORT || 3000;
+
+// ===== 資料儲存（記憶體，重啟會清空）=====
+// 如需永久儲存，可替換成 SQLite 或 Firebase
+const userTodos = {}; // { userId: [ { id, text, done, createdAt } ] }
+
+// ===== Middleware =====
+app.use(express.json({
+  verify: (req, res, buf) => { req.rawBody = buf; }
+}));
+
+// ===== LINE 簽章驗證 =====
+function verifySignature(req) {
+  const signature = req.headers['x-line-signature'];
+  const hash = crypto
+    .createHmac('SHA256', CHANNEL_SECRET)
+    .update(req.rawBody)
+    .digest('base64');
+  return signature === hash;
+}
+
+// ===== 回覆 LINE 訊息 =====
+async function replyMessage(replyToken, messages) {
+  const payload = {
+    replyToken,
+    messages: Array.isArray(messages)
+      ? messages
+      : [{ type: 'text', text: messages }]
+  };
+  await axios.post('https://api.line.me/v2/bot/message/reply', payload, {
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${CHANNEL_ACCESS_TOKEN}`
+    }
+  });
+}
+
+// ===== 取得使用者的 Todo 清單 =====
+function getTodos(userId) {
+  if (!userTodos[userId]) userTodos[userId] = [];
+  return userTodos[userId];
+}
+
+// ===== 產生今日摘要 =====
+function getDailySummary(userId) {
+  const todos = getTodos(userId);
+  const today = new Date().toLocaleDateString('zh-TW', {
+    year: 'numeric', month: 'long', day: 'numeric', weekday: 'long'
+  });
+
+  if (todos.length === 0) {
+    return `📅 ${today}\n\n目前沒有任何待辦事項！\n輸入「+ 事情」來新增吧 😊`;
+  }
+
+  const pending = todos.filter(t => !t.done);
+  const done = todos.filter(t => t.done);
+
+  let msg = `📅 ${today}\n`;
+  msg += `━━━━━━━━━━━━━━\n`;
+
+  if (pending.length > 0) {
+    msg += `\n📌 待完成（${pending.length} 項）\n`;
+    pending.forEach((t, i) => {
+      msg += `  ${i + 1}. ${t.text}\n`;
+    });
+  }
+
+  if (done.length > 0) {
+    msg += `\n✅ 已完成（${done.length} 項）\n`;
+    done.forEach(t => {
+      msg += `  ✓ ${t.text}\n`;
+    });
+  }
+
+  const total = todos.length;
+  const pct = total > 0 ? Math.round((done.length / total) * 100) : 0;
+  msg += `\n━━━━━━━━━━━━━━\n`;
+  msg += `完成率：${pct}% 🎯`;
+
+  return msg;
+}
+
+// ===== 指令說明 =====
+const HELP_TEXT = `🤖 待辦機器人使用說明
+━━━━━━━━━━━━━━
+➕ 新增事項
+  輸入「+ 事情名稱」
+  例：+ 買早餐
+
+✅ 完成事項
+  輸入「✓ 編號」或「完成 編號」
+  例：完成 1
+
+🗑 刪除事項
+  輸入「刪除 編號」
+  例：刪除 2
+
+📋 查看清單
+  輸入「清單」或「list」
+
+📅 今日摘要
+  輸入「今天」或「摘要」
+
+🔄 清除已完成
+  輸入「清除完成」
+
+❓ 說明
+  輸入「說明」或「help」`;
+
+// ===== 處理訊息邏輯 =====
+async function handleMessage(event) {
+  const { replyToken, source, message } = event;
+  const userId = source.userId;
+  const text = message.text?.trim() || '';
+
+  // 新增待辦
+  if (text.startsWith('+') || text.startsWith('＋')) {
+    const task = text.replace(/^[+＋]\s*/, '').trim();
+    if (!task) {
+      return replyMessage(replyToken, '請輸入事項內容，例：+ 買早餐');
+    }
+    const todos = getTodos(userId);
+    const newTodo = {
+      id: Date.now(),
+      text: task,
+      done: false,
+      createdAt: new Date().toISOString()
+    };
+    todos.push(newTodo);
+    return replyMessage(replyToken, `✅ 已新增：${task}\n\n目前共 ${todos.filter(t => !t.done).length} 項待完成`);
+  }
+
+  // 完成事項
+  const doneMatch = text.match(/^(完成|✓|done)\s*(\d+)$/i);
+  if (doneMatch) {
+    const idx = parseInt(doneMatch[2]) - 1;
+    const pending = getTodos(userId).filter(t => !t.done);
+    if (idx < 0 || idx >= pending.length) {
+      return replyMessage(replyToken, `❌ 找不到第 ${idx + 1} 項，請輸入「清單」查看編號`);
+    }
+    pending[idx].done = true;
+    return replyMessage(replyToken, `🎉 完成：${pending[idx].text}`);
+  }
+
+  // 刪除事項
+  const deleteMatch = text.match(/^(刪除|delete|del)\s*(\d+)$/i);
+  if (deleteMatch) {
+    const idx = parseInt(deleteMatch[2]) - 1;
+    const todos = getTodos(userId);
+    const pending = todos.filter(t => !t.done);
+    if (idx < 0 || idx >= pending.length) {
+      return replyMessage(replyToken, `❌ 找不到第 ${idx + 1} 項`);
+    }
+    const removed = pending[idx];
+    const pos = todos.indexOf(removed);
+    todos.splice(pos, 1);
+    return replyMessage(replyToken, `🗑 已刪除：${removed.text}`);
+  }
+
+  // 清除已完成
+  if (['清除完成', '清除', 'clear'].includes(text.toLowerCase())) {
+    const todos = getTodos(userId);
+    const before = todos.length;
+    userTodos[userId] = todos.filter(t => !t.done);
+    const removed = before - userTodos[userId].length;
+    return replyMessage(replyToken, `🧹 已清除 ${removed} 項已完成事項`);
+  }
+
+  // 查看清單
+  if (['清單', 'list', '待辦'].includes(text.toLowerCase())) {
+    return replyMessage(replyToken, getDailySummary(userId));
+  }
+
+  // 今日摘要
+  if (['今天', '摘要', 'summary', '今日'].includes(text.toLowerCase())) {
+    return replyMessage(replyToken, getDailySummary(userId));
+  }
+
+  // 說明
+  if (['說明', 'help', '?', '？', '幫助'].includes(text.toLowerCase())) {
+    return replyMessage(replyToken, HELP_TEXT);
+  }
+
+  // 預設回應
+  return replyMessage(replyToken, `👋 你好！我是你的待辦小幫手\n\n輸入「說明」查看使用方法\n輸入「+ 事項」快速新增待辦`);
+}
+
+// ===== Webhook 路由 =====
+app.post('/webhook', async (req, res) => {
+  if (!verifySignature(req)) {
+    return res.status(400).send('Invalid signature');
+  }
+
+  res.status(200).send('OK'); // 先回應 LINE，避免 timeout
+
+  const events = req.body.events || [];
+  for (const event of events) {
+    if (event.type === 'message' && event.message.type === 'text') {
+      try {
+        await handleMessage(event);
+      } catch (err) {
+        console.error('Error handling message:', err.response?.data || err.message);
+      }
+    }
+  }
+});
+
+// ===== 健康檢查 =====
+app.get('/', (req, res) => res.send('LINE Todo Bot is running! 🤖'));
+
+app.listen(PORT, () => {
+  console.log(`✅ Server running on port ${PORT}`);
+});
+
+{
+  "name": "line-todo-bot",
+  "version": "1.0.0",
+  "description": "LINE 待辦事項機器人",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.0",
+    "express": "^4.18.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
+
+# LINE 待辦事項機器人 🤖
+
+## 功能
+- ➕ 新增待辦事項
+- ✅ 標記完成
+- 🗑 刪除事項
+- 📅 每日摘要（完成率統計）
+
+## 快速部署步驟
+
+### 1. 申請 LINE Messaging API
+1. 前往 https://developers.line.biz/
+2. 登入 → Create Provider → Create Channel → Messaging API
+3. 記下 **Channel Secret** 和 **Channel Access Token**
+
+### 2. 部署到 Render.com（免費）
+1. 註冊 https://render.com
+2. New → Web Service → 上傳此程式碼（或連結 GitHub）
+3. 設定環境變數：
+   - `CHANNEL_SECRET` = 你的 Channel Secret
+   - `CHANNEL_ACCESS_TOKEN` = 你的 Token
+4. 取得網址，例如：`https://your-app.onrender.com`
+
+### 3. 設定 Webhook
+1. 回到 LINE Developers Console
+2. Messaging API → Webhook URL 填入：
+   `https://your-app.onrender.com/webhook`
+3. 點「Verify」確認連線
+4. 開啟「Use webhook」
+
+### 4. 關閉自動回覆
+在 LINE Official Account Manager 關閉預設自動回覆訊息
+
+## 本地測試
+```bash
+npm install
+CHANNEL_SECRET=xxx CHANNEL_ACCESS_TOKEN=yyy node index.js
+# 用 ngrok 建立公開網址：ngrok http 3000
+```
+
+## 指令一覽
+| 輸入 | 功能 |
+|------|------|
+| `+ 買早餐` | 新增待辦 |
+| `完成 1` | 完成第1項 |
+| `刪除 2` | 刪除第2項 |
+| `清單` | 查看所有事項 |
+| `今天` | 今日摘要 |
+| `清除完成` | 清除已完成 |
+| `說明` | 查看幫助 |
+
+services:
+  - type: web
+    name: line-todo-bot
+    env: node
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: CHANNEL_SECRET
+        sync: false
+      - key: CHANNEL_ACCESS_TOKEN
+        sync: false
