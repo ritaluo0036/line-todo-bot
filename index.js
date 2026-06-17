@@ -69,26 +69,35 @@ function formatDateDisplay(dateStr) {
   return ` 📅${parseInt(y)-1911}.${m}.${d}`;
 }
 
+const MAIN_MENU = ['➕ 新增', '📋 清單', '❓ 說明'];
+
+function showMainMenu(replyToken, text) {
+  return replyMessage(replyToken, text, MAIN_MENU);
+}
+
 function getDailySummary(userId) {
   const todos = getTodos(userId);
   const tw = new Date(new Date().getTime() + 8 * 60 * 60 * 1000);
   const dateStr = tw.toLocaleDateString('zh-TW', { year:'numeric', month:'long', day:'numeric', weekday:'long', timeZone:'Asia/Taipei' });
-  if (todos.length === 0) return `📅 ${dateStr}\n\n目前沒有任何待辦事項！\n輸入「+」來新增吧 😊`;
+  if (todos.length === 0) return `📅 ${dateStr}\n\n目前沒有任何待辦事項！`;
   const pending = todos.filter(t => !t.done);
   const done = todos.filter(t => t.done);
   let msg = `📅 ${dateStr}\n━━━━━━━━━━━━━━\n`;
   if (pending.length > 0) { msg += `\n📌 待完成（${pending.length} 項）\n`; pending.forEach((t,i) => { const e=TYPE_EMOJI[t.type]||'📌'; msg+=`  ${i+1}. ${e}${t.type?`[${t.type}]`:''}${formatDateDisplay(t.date)} ${t.text}\n`; }); }
   if (done.length > 0) { msg += `\n✅ 已完成（${done.length} 項）\n`; done.forEach(t => { const e=TYPE_EMOJI[t.type]||'📌'; msg+=`  ✓ ${e}${t.type?`[${t.type}]`:''}${formatDateDisplay(t.date)} ${t.text}\n`; }); }
-  msg += `\n━━━━━━━━━━━━━━\n完成率：${todos.length>0?Math.round((done.length/todos.length)*100):0}% 🎯`;
+  msg += `\n━━━━━━━━━━━━━━\n完成率：${Math.round((done.length/todos.length)*100)}% 🎯`;
   return msg;
 }
 
 function showTypeSelect(replyToken) {
-  return replyMessage(replyToken, '請選擇類型 👇', TYPES.map(t => `${TYPE_EMOJI[t]}${t}`));
+  return replyMessage(replyToken, '請選擇類型 👇',
+    [...TYPES.map(t => `${TYPE_EMOJI[t]}${t}`), '📋 檢視清單', '🏠 主選單']);
 }
 
 function askContinue(replyToken, sessionCount) {
-  return replyMessage(replyToken, `✅ 已新增！（本次共 ${sessionCount} 筆）\n\n還有要新增的嗎？`, ['➕ 繼續新增', '✅ 完成']);
+  return replyMessage(replyToken,
+    `✅ 已新增！（本次共 ${sessionCount} 筆）\n\n還有要新增的嗎？`,
+    ['➕ 繼續新增', '✅ 完成新增', '🏠 主選單']);
 }
 
 function scheduleDailyReminder() {
@@ -120,7 +129,7 @@ function scheduleDailyReminder() {
   setTimeout(run, getNextRunMs());
 }
 
-const HELP_TEXT = `🤖 待辦機器人使用說明\n━━━━━━━━━━━━━━\n➕ 新增：輸入「+」→ 選類型 → 輸入日期說明 → 繼續或完成\n✅ 完成：完成 編號\n🗑 刪除：刪除 編號\n📋 清單：清單\n🔄 清除完成：清除完成`;
+const HELP_TEXT = `🤖 待辦機器人使用說明\n━━━━━━━━━━━━━━\n➕ 新增：按「➕ 新增」→ 選類型 → 輸入日期說明\n✅ 完成：完成 編號（例：完成 1）\n🗑 刪除：刪除 編號（例：刪除 2）\n📋 清單：查看所有待辦\n🔄 清除完成：清除已完成\n🏠 主選單：隨時返回`;
 
 async function handleMessage(event) {
   const { replyToken, source, message } = event;
@@ -128,17 +137,29 @@ async function handleMessage(event) {
   const text = message.text?.trim() || '';
   const state = userState[userId];
 
-  if (text === '取消') { delete userState[userId]; return replyMessage(replyToken, '已取消新增 😊'); }
+  if (['🏠 主選單', '主選單', '取消'].includes(text)) {
+    delete userState[userId];
+    return showMainMenu(replyToken, '🏠 主選單');
+  }
 
-  if (text === '✅ 完成' || text === '完成新增') {
+  if (['📋 清單', '📋 檢視清單', '清單', 'list', '待辦', '今天', '摘要', 'summary', '今日'].includes(text.toLowerCase())) {
+    delete userState[userId];
+    return replyMessage(replyToken, getDailySummary(userId), ['➕ 新增', '🔄 清除完成', '🏠 主選單']);
+  }
+
+  if (['❓ 說明', '說明', 'help', '?', '？'].includes(text.toLowerCase())) {
+    delete userState[userId];
+    return replyMessage(replyToken, HELP_TEXT, MAIN_MENU);
+  }
+
+  if (['✅ 完成新增', '完成新增'].includes(text)) {
     const count = state?.sessionCount || 0;
     delete userState[userId];
-    return replyMessage(replyToken, `📋 本次共新增 ${count} 項\n輸入「清單」查看全部待辦 😊`, ['📋 清單', '➕ 新增']);
+    return showMainMenu(replyToken, `📋 本次共新增 ${count} 項，完成！`);
   }
 
   if (text === '➕ 繼續新增') {
-    const count = state?.sessionCount || 0;
-    userState[userId] = { state: 'select_type', sessionCount: count };
+    userState[userId] = { state: 'select_type', sessionCount: state?.sessionCount || 0 };
     return showTypeSelect(replyToken);
   }
 
@@ -146,14 +167,14 @@ async function handleMessage(event) {
     const matchedType = TYPES.find(t => text === `${TYPE_EMOJI[t]}${t}` || text === t);
     if (!matchedType) return showTypeSelect(replyToken);
     userState[userId] = { state: 'input_detail', type: matchedType, sessionCount: state.sessionCount };
-    return replyMessage(replyToken, `${TYPE_EMOJI[matchedType]} 「${matchedType}」\n\n請輸入日期和說明：\n例：115.07.02 合約\n\n（輸入「取消」可放棄）`);
+    return replyMessage(replyToken, `${TYPE_EMOJI[matchedType]} 「${matchedType}」\n\n請輸入日期和說明：\n例：115.07.02 合約\n\n（按「🏠 主選單」可返回）`);
   }
 
   if (state?.state === 'input_detail') {
     const { type, sessionCount } = state;
     const date = parseDate(text);
     const taskText = date ? text.replace(/^\d{3,4}[./\-]\d{1,2}[./\-]\d{1,2}\s*/, '').trim() : text.trim();
-    if (!taskText) return replyMessage(replyToken, '請輸入說明文字\n例：115.07.02 合約');
+    if (!taskText) return replyMessage(replyToken, '⚠️ 請輸入說明文字\n例：115.07.02 合約');
     getTodos(userId).push({ id: Date.now(), text: taskText, type, date: date||null, done: false, createdAt: new Date().toISOString() });
     saveData(db);
     const newCount = (sessionCount||0) + 1;
@@ -161,9 +182,11 @@ async function handleMessage(event) {
     return askContinue(replyToken, newCount);
   }
 
-  if (state?.state === 'ask_continue') { return askContinue(replyToken, state.sessionCount); }
+  if (state?.state === 'ask_continue') {
+    return askContinue(replyToken, state.sessionCount);
+  }
 
-  if (text === '+' || text === '＋' || text === '➕ 新增' || text === '新增') {
+  if (['+', '＋', '➕ 新增', '新增'].includes(text)) {
     userState[userId] = { state: 'select_type', sessionCount: 0 };
     return showTypeSelect(replyToken);
   }
@@ -178,9 +201,9 @@ async function handleMessage(event) {
   if (doneMatch) {
     const idx = parseInt(doneMatch[2]) - 1;
     const pending = getTodos(userId).filter(t => !t.done);
-    if (idx < 0 || idx >= pending.length) return replyMessage(replyToken, `❌ 找不到第 ${idx+1} 項`);
+    if (idx < 0 || idx >= pending.length) return replyMessage(replyToken, `❌ 找不到第 ${idx+1} 項`, ['📋 清單']);
     pending[idx].done = true; saveData(db);
-    return replyMessage(replyToken, `🎉 完成：${pending[idx].text}`, ['📋 清單', '➕ 新增']);
+    return replyMessage(replyToken, `🎉 完成：${pending[idx].text}`, ['📋 清單', '➕ 新增', '🏠 主選單']);
   }
 
   const delMatch = text.match(/^(刪除|delete|del)\s*(\d+)$/i);
@@ -188,24 +211,19 @@ async function handleMessage(event) {
     const idx = parseInt(delMatch[2]) - 1;
     const todos = getTodos(userId);
     const pending = todos.filter(t => !t.done);
-    if (idx < 0 || idx >= pending.length) return replyMessage(replyToken, `❌ 找不到第 ${idx+1} 項`);
-    todos.splice(todos.indexOf(pending[idx]), 1); saveData(db);
-    return replyMessage(replyToken, `🗑 已刪除：${pending[idx].text}`, ['📋 清單']);
+    if (idx < 0 || idx >= pending.length) return replyMessage(replyToken, `❌ 找不到第 ${idx+1} 項`, ['📋 清單']);
+    const removed = pending[idx];
+    todos.splice(todos.indexOf(removed), 1); saveData(db);
+    return replyMessage(replyToken, `🗑 已刪除：${removed.text}`, ['📋 清單', '🏠 主選單']);
   }
 
-  if (['清除完成','清除','clear'].includes(text.toLowerCase())) {
+  if (['🔄 清除完成', '清除完成', '清除', 'clear'].includes(text.toLowerCase())) {
     const todos = getTodos(userId); const before = todos.length;
     db.todos[userId] = todos.filter(t=>!t.done); saveData(db);
-    return replyMessage(replyToken, `🧹 已清除 ${before-db.todos[userId].length} 項已完成事項`);
+    return replyMessage(replyToken, `🧹 已清除 ${before-db.todos[userId].length} 項已完成事項`, MAIN_MENU);
   }
 
-  if (['清單','list','待辦','今天','摘要','summary','今日'].includes(text.toLowerCase())) {
-    return replyMessage(replyToken, getDailySummary(userId), ['➕ 新增', '🔄 清除完成']);
-  }
-
-  if (['說明','help','?','？'].includes(text.toLowerCase())) { return replyMessage(replyToken, HELP_TEXT); }
-
-  return replyMessage(replyToken, `👋 哈囉！要新增待辦事項嗎？`, ['➕ 新增', '📋 清單', '❓ 說明']);
+  return showMainMenu(replyToken, '👋 哈囉！請選擇功能：');
 }
 
 app.post('/webhook', async (req, res) => {
