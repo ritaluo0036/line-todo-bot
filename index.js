@@ -12,7 +12,7 @@ const DATA_FILE = path.join('/tmp', 'todos.json');
 
 const TYPE_EMOJI = { '修繕': '🔧', '打掃': '🧹', '續約': '📝', '退租': '🚪', '提醒': '🔔', '其他': '📌' };
 const TYPES = Object.keys(TYPE_EMOJI);
-const waitingState = {};
+const userState = {};
 
 function loadData() {
   try { if (fs.existsSync(DATA_FILE)) return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); } catch (e) {}
@@ -38,8 +38,8 @@ function verifySignature(req) {
 
 async function replyMessage(replyToken, text, quickReplies) {
   const message = { type: 'text', text };
-  if (quickReplies) {
-    message.quickReply = { items: quickReplies.map(label => ({ type: 'action', action: { type: 'message', label, text: label } })) };
+  if (quickReplies && quickReplies.length > 0) {
+    message.quickReply = { items: quickReplies.map(label => ({ type: 'action', action: { type: 'message', label: label.slice(0,20), text: label } })) };
   }
   await axios.post('https://api.line.me/v2/bot/message/reply', { replyToken, messages: [message] },
     { headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${CHANNEL_ACCESS_TOKEN}` } });
@@ -77,10 +77,18 @@ function getDailySummary(userId) {
   const pending = todos.filter(t => !t.done);
   const done = todos.filter(t => t.done);
   let msg = `📅 ${dateStr}\n━━━━━━━━━━━━━━\n`;
-  if (pending.length > 0) { msg += `\n📌 待完成（${pending.length} 項）\n`; pending.forEach((t,i) => { const e = TYPE_EMOJI[t.type]||'📌'; msg += `  ${i+1}. ${e}${t.type?`[${t.type}]`:''}${formatDateDisplay(t.date)} ${t.text}\n`; }); }
-  if (done.length > 0) { msg += `\n✅ 已完成（${done.length} 項）\n`; done.forEach(t => { const e = TYPE_EMOJI[t.type]||'📌'; msg += `  ✓ ${e}${t.type?`[${t.type}]`:''}${formatDateDisplay(t.date)} ${t.text}\n`; }); }
-  msg += `\n━━━━━━━━━━━━━━\n完成率：${Math.round((done.length/todos.length)*100)}% 🎯`;
+  if (pending.length > 0) { msg += `\n📌 待完成（${pending.length} 項）\n`; pending.forEach((t,i) => { const e=TYPE_EMOJI[t.type]||'📌'; msg+=`  ${i+1}. ${e}${t.type?`[${t.type}]`:''}${formatDateDisplay(t.date)} ${t.text}\n`; }); }
+  if (done.length > 0) { msg += `\n✅ 已完成（${done.length} 項）\n`; done.forEach(t => { const e=TYPE_EMOJI[t.type]||'📌'; msg+=`  ✓ ${e}${t.type?`[${t.type}]`:''}${formatDateDisplay(t.date)} ${t.text}\n`; }); }
+  msg += `\n━━━━━━━━━━━━━━\n完成率：${todos.length>0?Math.round((done.length/todos.length)*100):0}% 🎯`;
   return msg;
+}
+
+function showTypeSelect(replyToken) {
+  return replyMessage(replyToken, '請選擇類型 👇', TYPES.map(t => `${TYPE_EMOJI[t]}${t}`));
+}
+
+function askContinue(replyToken, sessionCount) {
+  return replyMessage(replyToken, `✅ 已新增！（本次共 ${sessionCount} 筆）\n\n還有要新增的嗎？`, ['➕ 繼續新增', '✅ 完成']);
 }
 
 function scheduleDailyReminder() {
@@ -101,7 +109,9 @@ function scheduleDailyReminder() {
         const todayTodos = (db.todos[userId]||[]).filter(t => !t.done && t.date === today);
         let msg = todayTodos.length === 0
           ? `🌅 早安！\n📅 今天 ${dateDisplay} 沒有待辦事項\n\n輸入「清單」查看所有事項 😊`
-          : `🌅 早安！📅 今天 ${dateDisplay} 有 ${todayTodos.length} 件事要做：\n\n` + todayTodos.map((t,i) => `  ${i+1}. ${TYPE_EMOJI[t.type]||'📌'}${t.type?`[${t.type}] `:''}${t.text}`).join('\n') + `\n\n加油！完成後輸入「完成 編號」✅`;
+          : `🌅 早安！📅 今天 ${dateDisplay} 有 ${todayTodos.length} 件事要做：\n\n`
+            + todayTodos.map((t,i) => `  ${i+1}. ${TYPE_EMOJI[t.type]||'📌'}${t.type?`[${t.type}] `:''}${t.text}`).join('\n')
+            + `\n\n加油！完成後輸入「完成 編號」✅`;
         await pushMessage(userId, msg);
       } catch (e) { console.error('Push error:', e.response?.data || e.message); }
     });
@@ -110,48 +120,58 @@ function scheduleDailyReminder() {
   setTimeout(run, getNextRunMs());
 }
 
-const HELP_TEXT = `🤖 待辦機器人使用說明\n━━━━━━━━━━━━━━\n➕ 快捷新增：輸入「+」→ 選類型 → 輸入日期說明\n➕ 直接新增：+ 115.06.20 修繕 新光路漏水\n✅ 完成：完成 編號\n🗑 刪除：刪除 編號\n📋 清單：清單\n🔄 清除完成：清除完成`;
+const HELP_TEXT = `🤖 待辦機器人使用說明\n━━━━━━━━━━━━━━\n➕ 新增：輸入「+」→ 選類型 → 輸入日期說明 → 繼續或完成\n✅ 完成：完成 編號\n🗑 刪除：刪除 編號\n📋 清單：清單\n🔄 清除完成：清除完成`;
 
 async function handleMessage(event) {
   const { replyToken, source, message } = event;
   const userId = source.userId;
   const text = message.text?.trim() || '';
+  const state = userState[userId];
 
-  if (waitingState[userId]) {
-    const { type } = waitingState[userId];
-    delete waitingState[userId];
-    const date = parseDate(text);
-    const taskText = date ? text.replace(/^\d{3,4}[./\-]\d{1,2}[./\-]\d{1,2}\s*/, '').trim() : text.trim();
-    if (!taskText) return replyMessage(replyToken, '請輸入說明文字，例：115.07.01 民生路');
-    const todos = getTodos(userId);
-    todos.push({ id: Date.now(), text: taskText, type, date: date||null, done: false, createdAt: new Date().toISOString() });
-    saveData(db);
-    const emoji = TYPE_EMOJI[type]||'📌';
-    return replyMessage(replyToken, `✅ 已新增：${emoji}[${type}] ${taskText}${date?`\n日期：${formatDateDisplay(date).trim()}`:''}\n\n待完成共 ${todos.filter(t=>!t.done).length} 項`);
+  if (text === '取消') { delete userState[userId]; return replyMessage(replyToken, '已取消新增 😊'); }
+
+  if (text === '✅ 完成' || text === '完成新增') {
+    const count = state?.sessionCount || 0;
+    delete userState[userId];
+    return replyMessage(replyToken, `📋 本次共新增 ${count} 項\n輸入「清單」查看全部待辦 😊`, ['📋 清單', '➕ 新增']);
   }
 
-  if (text === '+' || text === '＋') {
-    return replyMessage(replyToken, '請選擇類型 👇', TYPES.map(t => `${TYPE_EMOJI[t]}${t}`));
+  if (text === '➕ 繼續新增') {
+    const count = state?.sessionCount || 0;
+    userState[userId] = { state: 'select_type', sessionCount: count };
+    return showTypeSelect(replyToken);
+  }
+
+  if (state?.state === 'select_type') {
+    const matchedType = TYPES.find(t => text === `${TYPE_EMOJI[t]}${t}` || text === t);
+    if (!matchedType) return showTypeSelect(replyToken);
+    userState[userId] = { state: 'input_detail', type: matchedType, sessionCount: state.sessionCount };
+    return replyMessage(replyToken, `${TYPE_EMOJI[matchedType]} 「${matchedType}」\n\n請輸入日期和說明：\n例：115.07.02 合約\n\n（輸入「取消」可放棄）`);
+  }
+
+  if (state?.state === 'input_detail') {
+    const { type, sessionCount } = state;
+    const date = parseDate(text);
+    const taskText = date ? text.replace(/^\d{3,4}[./\-]\d{1,2}[./\-]\d{1,2}\s*/, '').trim() : text.trim();
+    if (!taskText) return replyMessage(replyToken, '請輸入說明文字\n例：115.07.02 合約');
+    getTodos(userId).push({ id: Date.now(), text: taskText, type, date: date||null, done: false, createdAt: new Date().toISOString() });
+    saveData(db);
+    const newCount = (sessionCount||0) + 1;
+    userState[userId] = { state: 'ask_continue', sessionCount: newCount };
+    return askContinue(replyToken, newCount);
+  }
+
+  if (state?.state === 'ask_continue') { return askContinue(replyToken, state.sessionCount); }
+
+  if (text === '+' || text === '＋' || text === '➕ 新增' || text === '新增') {
+    userState[userId] = { state: 'select_type', sessionCount: 0 };
+    return showTypeSelect(replyToken);
   }
 
   const matchedType = TYPES.find(t => text === `${TYPE_EMOJI[t]}${t}` || text === t);
   if (matchedType) {
-    waitingState[userId] = { type: matchedType };
-    return replyMessage(replyToken, `${TYPE_EMOJI[matchedType]} 選擇了「${matchedType}」\n\n請輸入日期和說明：\n例：115.07.01 民生路`);
-  }
-
-  if (text.startsWith('+') || text.startsWith('＋')) {
-    const content = text.replace(/^[+＋]\s*/, '').trim();
-    if (!content) return replyMessage(replyToken, '請選擇類型 👇', TYPES.map(t => `${TYPE_EMOJI[t]}${t}`));
-    const date = parseDate(content);
-    let remaining = date ? content.replace(/^\d{3,4}[./\-]\d{1,2}[./\-]\d{1,2}\s*/, '').trim() : content;
-    let detectedType = null;
-    for (const t of TYPES) { if (remaining.startsWith(t)) { detectedType = t; remaining = remaining.slice(t.length).trim(); break; } }
-    if (!remaining) return replyMessage(replyToken, '請輸入說明文字');
-    getTodos(userId).push({ id: Date.now(), text: remaining, type: detectedType||null, date: date||null, done: false, createdAt: new Date().toISOString() });
-    saveData(db);
-    const emoji = detectedType ? TYPE_EMOJI[detectedType] : '📌';
-    return replyMessage(replyToken, `✅ 已新增：${emoji}${detectedType?`[${detectedType}] `:''}${remaining}${date?`\n日期：${formatDateDisplay(date).trim()}`:''}\n\n待完成共 ${getTodos(userId).filter(t=>!t.done).length} 項`);
+    userState[userId] = { state: 'input_detail', type: matchedType, sessionCount: 0 };
+    return replyMessage(replyToken, `${TYPE_EMOJI[matchedType]} 「${matchedType}」\n\n請輸入日期和說明：\n例：115.07.02 合約`);
   }
 
   const doneMatch = text.match(/^(完成|✓|done)\s*(\d+)$/i);
@@ -160,7 +180,7 @@ async function handleMessage(event) {
     const pending = getTodos(userId).filter(t => !t.done);
     if (idx < 0 || idx >= pending.length) return replyMessage(replyToken, `❌ 找不到第 ${idx+1} 項`);
     pending[idx].done = true; saveData(db);
-    return replyMessage(replyToken, `🎉 完成：${pending[idx].text}`);
+    return replyMessage(replyToken, `🎉 完成：${pending[idx].text}`, ['📋 清單', '➕ 新增']);
   }
 
   const delMatch = text.match(/^(刪除|delete|del)\s*(\d+)$/i);
@@ -169,9 +189,8 @@ async function handleMessage(event) {
     const todos = getTodos(userId);
     const pending = todos.filter(t => !t.done);
     if (idx < 0 || idx >= pending.length) return replyMessage(replyToken, `❌ 找不到第 ${idx+1} 項`);
-    const removed = pending[idx];
-    todos.splice(todos.indexOf(removed), 1); saveData(db);
-    return replyMessage(replyToken, `🗑 已刪除：${removed.text}`);
+    todos.splice(todos.indexOf(pending[idx]), 1); saveData(db);
+    return replyMessage(replyToken, `🗑 已刪除：${pending[idx].text}`, ['📋 清單']);
   }
 
   if (['清除完成','清除','clear'].includes(text.toLowerCase())) {
@@ -181,14 +200,12 @@ async function handleMessage(event) {
   }
 
   if (['清單','list','待辦','今天','摘要','summary','今日'].includes(text.toLowerCase())) {
-    return replyMessage(replyToken, getDailySummary(userId));
+    return replyMessage(replyToken, getDailySummary(userId), ['➕ 新增', '🔄 清除完成']);
   }
 
-  if (['說明','help','?','？'].includes(text.toLowerCase())) {
-    return replyMessage(replyToken, HELP_TEXT);
-  }
+  if (['說明','help','?','？'].includes(text.toLowerCase())) { return replyMessage(replyToken, HELP_TEXT); }
 
-  return replyMessage(replyToken, `👋 輸入「+」快捷新增待辦`, ['➕ 新增', '📋 清單', '❓ 說明']);
+  return replyMessage(replyToken, `👋 哈囉！要新增待辦事項嗎？`, ['➕ 新增', '📋 清單', '❓ 說明']);
 }
 
 app.post('/webhook', async (req, res) => {
@@ -196,7 +213,8 @@ app.post('/webhook', async (req, res) => {
   res.status(200).send('OK');
   for (const event of req.body.events || []) {
     if (event.type === 'message' && event.message.type === 'text') {
-      try { await handleMessage(event); } catch (e) { console.error(e.response?.data || e.message); } }
+      try { await handleMessage(event); } catch (e) { console.error(e.response?.data || e.message); }
+    }
   }
 });
 
